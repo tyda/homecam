@@ -15,6 +15,7 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 import httpx
+import imageio_ffmpeg
 import websockets
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Response
@@ -92,11 +93,18 @@ def snapshot_from_http(url: str) -> bytes:
         return r.content
 
 
+def ffmpeg_exe() -> str:
+    system_ffmpeg = Path("/usr/bin/ffmpeg")
+    if system_ffmpeg.exists():
+        return str(system_ffmpeg)
+    return imageio_ffmpeg.get_ffmpeg_exe()
+
+
 def snapshot_from_rtsp(url: str) -> bytes:
     timeout = int(float(os.getenv("SNAPSHOT_TIMEOUT_SECONDS", "12")))
     with tempfile.NamedTemporaryFile(suffix=".jpg") as f:
         cmd = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            ffmpeg_exe(), "-hide_banner", "-loglevel", "error",
             "-rtsp_transport", "tcp", "-y", "-i", url,
             "-frames:v", "1", "-q:v", "2", f.name,
         ]
@@ -239,6 +247,30 @@ async def _probe_icatch_stream(req: ICatchRequest, seconds: float = 5) -> dict:
     return {"ok": any(c["ok"] for c in channels), "host": host, "quality": "main" if high_quality else "sub", "channels": channels}
 
 
+def h264_to_jpeg(h264: bytes) -> bytes:
+    with tempfile.NamedTemporaryFile(suffix=".h264") as src, tempfile.NamedTemporaryFile(suffix=".jpg") as dst:
+        src.write(h264)
+        src.flush()
+        cmd = [ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y", "-f", "h264", "-i", src.name, "-frames:v", "1", dst.name]
+        try:
+            subprocess.run(cmd, check=True, timeout=12, capture_output=True, text=True)
+        except subprocess.CalledProcessError as exc:
+            msg = (exc.stderr or exc.stdout or "ffmpeg failed").strip()[-500:]
+            raise HTTPException(status_code=502, detail=f"iCATCH H.264 轉 JPG 失敗：{msg}") from exc
+        data = Path(dst.name).read_bytes()
+        if not data:
+            raise HTTPException(status_code=502, detail="iCATCH JPG 空白")
+        return data
+
+
+def snapshot_from_icatch_request(req: ICatchRequest, channel: int) -> bytes:
+    host = normalize_icatch_host(req.host)
+    high_quality = req.quality.lower() in {"main", "high", "hq", "1"}
+    seconds = float(os.getenv("ICATCH_CAPTURE_SECONDS", "8"))
+    h264 = asyncio.run(_capture_icatch_h264(host, channel, high_quality, seconds, req.user, req.password))
+    return h264_to_jpeg(h264)
+
+
 def snapshot_from_icatch(url: str) -> bytes:
     parsed = urlparse(url)
     host = normalize_icatch_host(parsed.hostname or os.getenv("ICATCH_HOST") or "")
@@ -254,20 +286,7 @@ def snapshot_from_icatch(url: str) -> bytes:
     high_quality = qs.get("quality", ["sub"])[0].lower() in {"main", "high", "hq", "1"}
     seconds = float(os.getenv("ICATCH_CAPTURE_SECONDS", "8"))
     h264 = asyncio.run(_capture_icatch_h264(host, channel, high_quality, seconds))
-
-    with tempfile.NamedTemporaryFile(suffix=".h264") as src, tempfile.NamedTemporaryFile(suffix=".jpg") as dst:
-        src.write(h264)
-        src.flush()
-        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "h264", "-i", src.name, "-frames:v", "1", dst.name]
-        try:
-            subprocess.run(cmd, check=True, timeout=12, capture_output=True, text=True)
-        except subprocess.CalledProcessError as exc:
-            msg = (exc.stderr or exc.stdout or "ffmpeg failed").strip()[-500:]
-            raise HTTPException(status_code=502, detail=f"iCATCH H.264 轉 JPG 失敗：{msg}") from exc
-        data = Path(dst.name).read_bytes()
-        if not data:
-            raise HTTPException(status_code=502, detail="iCATCH JPG 空白")
-        return data
+    return h264_to_jpeg(h264)
 
 
 def get_snapshot(cam: Camera) -> bytes:
@@ -355,6 +374,14 @@ def telegram_send_grid() -> dict:
 async def icatch_test(req: ICatchRequest) -> dict:
     # Password is used only for this request; do not store it anywhere.
     return await _probe_icatch_stream(req)
+
+
+@app.post("/api/icatch/snapshot/{channel}")
+def icatch_snapshot(channel: int, req: ICatchRequest) -> Response:
+    if channel < 1 or channel > 4:
+        raise HTTPException(status_code=400, detail="channel 必須是 1..4")
+    image = snapshot_from_icatch_request(req, channel)
+    return Response(image, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

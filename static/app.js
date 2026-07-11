@@ -37,13 +37,21 @@ function renderICatchResult(data) {
   resultEl.textContent = lines.join('\n');
 }
 
-async function testICatch() {
+async function icatchBody(forceSub = false) {
   const host = document.querySelector('#icatchHost').value.trim();
   const user = document.querySelector('#icatchUser').value.trim() || 'admin';
   const password = document.querySelector('#icatchPassword').value;
-  const quality = document.querySelector('#icatchQuality').value;
-  if (!host || !password) {
-    resultEl.textContent = '請輸入 IP / Host 和密碼';
+  const quality = forceSub ? 'sub' : document.querySelector('#icatchQuality').value;
+  if (!host || !password) throw new Error('請輸入 IP / Host 和密碼');
+  return { host, user, password, quality };
+}
+
+async function testICatch() {
+  let body;
+  try {
+    body = await icatchBody(false);
+  } catch (err) {
+    resultEl.textContent = err.message;
     return;
   }
 
@@ -52,7 +60,7 @@ async function testICatch() {
     const res = await fetch('/api/icatch/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ host, user, password, quality })
+      body: JSON.stringify(body)
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || '測試失敗');
@@ -62,8 +70,39 @@ async function testICatch() {
   }
 }
 
+async function showICatchSnapshot() {
+  const img = document.querySelector('#icatchPreview');
+  let body;
+  try {
+    body = await icatchBody(true); // force substream: H264, easier to decode on Vercel.
+  } catch (err) {
+    resultEl.textContent = err.message;
+    return;
+  }
+
+  resultEl.textContent = '抓 CH1 圖片中，約 10～20 秒…';
+  img.removeAttribute('src');
+  try {
+    const res = await fetch('/api/icatch/snapshot/1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || '抓圖失敗');
+    }
+    const blob = await res.blob();
+    img.src = URL.createObjectURL(blob);
+    resultEl.textContent = '✅ 已顯示 CH1 圖片（使用子碼流）';
+  } catch (err) {
+    resultEl.textContent = `❌ ${err.message}`;
+  }
+}
+
 document.querySelector('#refreshBtn').addEventListener('click', refresh);
 document.querySelector('#icatchTest').addEventListener('click', testICatch);
+document.querySelector('#icatchSnapshot').addEventListener('click', showICatchSnapshot);
 document.querySelector('#sendTelegram').addEventListener('click', async () => {
   statusEl.textContent = '傳送中…';
   try {
