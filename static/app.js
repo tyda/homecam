@@ -73,6 +73,7 @@ async function testICatch() {
 let liveRunning = false;
 let liveObjectUrl = null;
 let nativePlayer = null;
+let autoRefreshTimer = null;
 
 async function fetchICatchFrame(body) {
   const res = await fetch('/api/icatch/snapshot/1', {
@@ -122,22 +123,41 @@ async function startNativeLive() {
     resultEl.textContent = err.message;
     return;
   }
+
+  stopSnapshotAutoRefresh();
+  liveRunning = false;
   document.querySelector('#icatchPreview').removeAttribute('src');
+  document.querySelector('#nativeGrid').classList.add('is-live');
+
   nativePlayer = nativePlayer || new window.ICatchLivePlayer({
-    canvas: document.querySelector('#nativeCanvas'),
+    canvases: Array.from(document.querySelectorAll('.native-canvas')),
     status: resultEl
   });
   try {
-    await nativePlayer.start({ ...body, channel: 1 });
+    await nativePlayer.start({ ...body, channels: [1, 2, 3, 4], quality: 'sub' });
   } catch (err) {
     resultEl.textContent = `❌ ${err.message}`;
+    startSnapshotAutoRefresh();
   }
 }
 
 function stopICatchLive() {
   liveRunning = false;
   if (nativePlayer) nativePlayer.stop();
+  document.querySelector('#nativeGrid').classList.remove('is-live');
   resultEl.textContent = '已停止播放';
+  startSnapshotAutoRefresh();
+}
+
+function startSnapshotAutoRefresh() {
+  if (autoRefreshTimer) return;
+  autoRefreshTimer = setInterval(refresh, 30000);
+}
+
+function stopSnapshotAutoRefresh() {
+  if (!autoRefreshTimer) return;
+  clearInterval(autoRefreshTimer);
+  autoRefreshTimer = null;
 }
 
 function openDvrLivePage() {
@@ -168,4 +188,4 @@ document.querySelector('#sendTelegram').addEventListener('click', async () => {
 });
 
 loadCameras().then(refresh);
-setInterval(refresh, 30000);
+startSnapshotAutoRefresh();

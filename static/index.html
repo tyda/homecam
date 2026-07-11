@@ -24,11 +24,19 @@
         <label>密碼<input id="icatchPassword" type="password" autocomplete="current-password"></label>
         <label>畫質<select id="icatchQuality"><option value="sub">子碼流</option><option value="main">主碼流</option></select></label>
       </div>
-      <button id="icatchTest">測試連線</button>
-      <button id="nativeLive" class="secondary">原生即時播放 CH1</button>
-      <button id="icatchStop" class="danger">停止</button>
+      <div class="player-actions">
+        <button id="icatchTest">測試連線</button>
+        <button id="nativeLive" class="secondary">原生 4CH 即時播放</button>
+        <button id="icatchStop" class="danger">停止</button>
+      </div>
       <pre id="icatchResult"></pre>
-      <canvas id="nativeCanvas"></canvas>
+      <div id="nativeGrid" class="native-grid" aria-label="4CH 即時影像">
+        <canvas class="native-canvas" data-channel="1"></canvas>
+        <canvas class="native-canvas" data-channel="2"></canvas>
+        <canvas class="native-canvas" data-channel="3"></canvas>
+        <canvas class="native-canvas" data-channel="4"></canvas>
+      </div>
+      <canvas id="nativeCanvas" hidden></canvas>
       <img id="icatchPreview" alt="CH1 即時影像" />
     </section>
 
