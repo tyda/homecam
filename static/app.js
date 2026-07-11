@@ -72,6 +72,7 @@ async function testICatch() {
 
 let liveRunning = false;
 let liveObjectUrl = null;
+let nativePlayer = null;
 
 async function fetchICatchFrame(body) {
   const res = await fetch('/api/icatch/snapshot/1', {
@@ -113,8 +114,29 @@ async function startICatchLive() {
   }
 }
 
+async function startNativeLive() {
+  let body;
+  try {
+    body = await icatchBody(true);
+  } catch (err) {
+    resultEl.textContent = err.message;
+    return;
+  }
+  document.querySelector('#icatchPreview').removeAttribute('src');
+  nativePlayer = nativePlayer || new window.ICatchLivePlayer({
+    canvas: document.querySelector('#nativeCanvas'),
+    status: resultEl
+  });
+  try {
+    await nativePlayer.start({ ...body, channel: 1 });
+  } catch (err) {
+    resultEl.textContent = `❌ ${err.message}`;
+  }
+}
+
 function stopICatchLive() {
   liveRunning = false;
+  if (nativePlayer) nativePlayer.stop();
   resultEl.textContent = '已停止播放';
 }
 
@@ -131,6 +153,7 @@ function openDvrLivePage() {
 
 document.querySelector('#refreshBtn').addEventListener('click', refresh);
 document.querySelector('#icatchTest').addEventListener('click', testICatch);
+document.querySelector('#nativeLive').addEventListener('click', startNativeLive);
 document.querySelector('#icatchLive').addEventListener('click', startICatchLive);
 document.querySelector('#openDvrLive').addEventListener('click', openDvrLivePage);
 document.querySelector('#icatchStop').addEventListener('click', stopICatchLive);
