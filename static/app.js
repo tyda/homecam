@@ -118,9 +118,21 @@ function stopICatchLive() {
   resultEl.textContent = '已停止播放';
 }
 
+function openDvrLivePage() {
+  const host = document.querySelector('#icatchHost').value.trim();
+  if (!host) {
+    resultEl.textContent = '請先輸入 IP / Host';
+    return;
+  }
+  const cleanHost = host.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  window.open(`https://${cleanHost}/login.html`, '_blank', 'noopener,noreferrer');
+  resultEl.textContent = '已開啟 DVR 原廠即時頁；這才是真正連續影像。';
+}
+
 document.querySelector('#refreshBtn').addEventListener('click', refresh);
 document.querySelector('#icatchTest').addEventListener('click', testICatch);
 document.querySelector('#icatchLive').addEventListener('click', startICatchLive);
+document.querySelector('#openDvrLive').addEventListener('click', openDvrLivePage);
 document.querySelector('#icatchStop').addEventListener('click', stopICatchLive);
 document.querySelector('#sendTelegram').addEventListener('click', async () => {
   statusEl.textContent = '傳送中…';
