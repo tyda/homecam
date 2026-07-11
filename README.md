@@ -32,9 +32,30 @@ http://你的主機IP:8765/
 
 ## 接 iCATCH DVR
 
-先進 DVR 或路由器確認 DVR 的內網 IP，例如 `192.168.1.50`。
+本專案支援兩種接法：
 
-然後用 VLC/ffmpeg 測 RTSP。iCATCH 常見格式可能需要逐一測：
+### 方式 A：iCATCH WebSocket 串流（已在 KMQ-0425 / 4CH DVR 測通）
+
+這類 iCATCH 新版 Web UI 不是標準 RTSP URL，而是：
+
+```text
+https://DVR_IP/login.html
+wss://DVR_IP/streaming
+```
+
+`.env` 範例：
+
+```text
+ICATCH_USER=admin
+ICATCH_PASSWORD=你的密碼
+HOME_CAM_CAMERAS_JSON=[{"id":"ch1","name":"門口","url":"icatch://DVR_IP/ch1?quality=sub"},{"id":"ch2","name":"車庫","url":"icatch://DVR_IP/ch2?quality=sub"},{"id":"ch3","name":"曬衣區","url":"icatch://DVR_IP/ch3?quality=sub"},{"id":"ch4","name":"路邊","url":"icatch://DVR_IP/ch4?quality=sub"}]
+```
+
+`quality=sub` 會抓子碼流 H.264，適合四格快照與手機預覽。`quality=main` 可嘗試高畫質，但較吃頻寬與解碼時間。
+
+### 方式 B：標準 RTSP
+
+如果 DVR 另有標準 RTSP URL，可直接設定：
 
 ```text
 rtsp://帳號:密碼@DVR_IP:554/ch01.264

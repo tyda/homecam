@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import asyncio
+import base64
 import io
 import json
 import os
+import ssl
+import struct
 import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 
 import httpx
+import websockets
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.staticfiles import StaticFiles
@@ -99,9 +105,104 @@ def snapshot_from_rtsp(url: str) -> bytes:
         return data
 
 
+async def _capture_icatch_h264(host: str, channel: int, high_quality: bool, seconds: float) -> bytes:
+    user = os.getenv("ICATCH_USER", "admin")
+    password = os.getenv("ICATCH_PASSWORD")
+    if not password:
+        raise HTTPException(status_code=400, detail="未設定 ICATCH_PASSWORD")
+
+    auth = "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode()
+    ssl_ctx = ssl._create_unverified_context()
+    bit = 1 << (channel - 1)
+    cmd = f"vobits={bit:x},pbits={bit:x},aobits=0,hq={1 if high_quality else 0}"
+    uri = f"wss://{host}/streaming"
+    h264 = bytearray()
+    got_keyframe = False
+    deadline = time.time() + seconds
+
+    try:
+        async with websockets.connect(uri, ssl=ssl_ctx, open_timeout=8, max_size=None) as ws:
+            hello = await asyncio.wait_for(ws.recv(), timeout=5)
+            if not (isinstance(hello, bytes) and hello[:4] == b"wsli"):
+                raise HTTPException(status_code=502, detail="iCATCH websocket 未回傳 live 初始化訊號")
+            await ws.send(auth)
+            await ws.send(cmd)
+
+            while time.time() < deadline:
+                try:
+                    msg = await asyncio.wait_for(ws.recv(), timeout=3)
+                except asyncio.TimeoutError:
+                    break
+                if not isinstance(msg, bytes) or len(msg) < 40:
+                    continue
+                done = 0
+                while done + 40 <= len(msg):
+                    fourcc = msg[done : done + 4]
+                    data_size = struct.unpack_from("<I", msg, done + 24)[0]
+                    ch = struct.unpack_from("<I", msg, done + 28)[0]
+                    ex_size = struct.unpack_from("<I", msg, done + 36)[0]
+                    frame_size = 40 + ex_size + data_size
+                    if frame_size <= 0 or done + frame_size > len(msg):
+                        break
+                    frame = msg[done : done + frame_size]
+                    if fourcc == b"H264" and ch == channel - 1 and data_size > 0:
+                        key = struct.unpack_from("<I", frame, 56)[0] if len(frame) >= 60 else 0
+                        payload = frame[-data_size:]
+                        if key == 1:
+                            got_keyframe = True
+                        if got_keyframe:
+                            h264.extend(payload)
+                        if got_keyframe and len(h264) > 180_000:
+                            return bytes(h264)
+                    done += frame_size
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"iCATCH websocket 連線失敗：{type(exc).__name__}") from exc
+
+    if not h264:
+        raise HTTPException(status_code=502, detail="iCATCH 沒有取得可解碼 H.264 影格")
+    return bytes(h264)
+
+
+def snapshot_from_icatch(url: str) -> bytes:
+    parsed = urlparse(url)
+    host = parsed.hostname or os.getenv("ICATCH_HOST")
+    if not host:
+        raise HTTPException(status_code=400, detail="iCATCH URL 缺少 host")
+    qs = parse_qs(parsed.query)
+    channel_text = qs.get("channel", [None])[0]
+    if channel_text is None:
+        # Allow icatch://host/ch1 style.
+        digits = "".join(c for c in parsed.path if c.isdigit())
+        channel_text = digits or "1"
+    channel = int(channel_text)
+    if channel < 1 or channel > 16:
+        raise HTTPException(status_code=400, detail="iCATCH channel 必須介於 1..16")
+    high_quality = qs.get("quality", ["sub"])[0].lower() in {"main", "high", "hq", "1"}
+    seconds = float(os.getenv("ICATCH_CAPTURE_SECONDS", "8"))
+    h264 = asyncio.run(_capture_icatch_h264(host, channel, high_quality, seconds))
+
+    with tempfile.NamedTemporaryFile(suffix=".h264") as src, tempfile.NamedTemporaryFile(suffix=".jpg") as dst:
+        src.write(h264)
+        src.flush()
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "h264", "-i", src.name, "-frames:v", "1", dst.name]
+        try:
+            subprocess.run(cmd, check=True, timeout=12, capture_output=True, text=True)
+        except subprocess.CalledProcessError as exc:
+            msg = (exc.stderr or exc.stdout or "ffmpeg failed").strip()[-500:]
+            raise HTTPException(status_code=502, detail=f"iCATCH H.264 轉 JPG 失敗：{msg}") from exc
+        data = Path(dst.name).read_bytes()
+        if not data:
+            raise HTTPException(status_code=502, detail="iCATCH JPG 空白")
+        return data
+
+
 def get_snapshot(cam: Camera) -> bytes:
     if cam.url.startswith("demo://"):
         return demo_image(cam)
+    if cam.url.startswith("icatch://"):
+        return snapshot_from_icatch(cam.url)
     if cam.url.startswith(("rtsp://", "rtsps://")):
         return snapshot_from_rtsp(cam.url)
     if cam.url.startswith(("http://", "https://")):
