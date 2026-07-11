@@ -109,7 +109,16 @@ class ICatchLivePlayer {
 
   decode(payload, isKey) {
     if (!this.decoder || this.decoder.state !== 'configured') return;
-    this.timestamp += 33333;
+
+    // Keep latency low on phones: if decoding falls behind, drop delta frames
+    // and wait for the next key frame instead of building a huge queue.
+    if (this.decoder.decodeQueueSize > 2 && !isKey) return;
+    if (this.decoder.decodeQueueSize > 8) {
+      this.setStatus('⚠️ 手機解碼跟不上，已自動降延遲丟幀');
+      return;
+    }
+
+    this.timestamp += 33333; // ~30fps timestamp; display is still driven by decoded output.
     try {
       this.decoder.decode(new EncodedVideoChunk({
         type: isKey ? 'key' : 'delta',
