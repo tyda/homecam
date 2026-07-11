@@ -1,16 +1,27 @@
 class ICatchLivePlayer {
-  constructor({ canvas, status }) {
-    this.canvas = canvas;
+  constructor({ canvas, canvases, status }) {
+    this.singleCanvas = canvas || null;
+    this.canvases = canvases || (canvas ? [canvas] : []);
     this.status = status;
-    this.ctx = canvas.getContext('2d');
+    this.contexts = this.canvases.map(c => {
+      const ctx = c.getContext('2d', { alpha: false, desynchronized: true });
+      ctx.imageSmoothingEnabled = true;
+      return ctx;
+    });
     this.ws = null;
-    this.decoder = null;
+    this.decoders = [];
     this.running = false;
-    this.timestamp = 0;
-    this.frames = 0;
+    this.timestamps = [];
+    this.frames = [];
+    this.gotKeyFrame = [];
+    this.lastStatusAt = 0;
+    this.channelCount = this.canvases.length || 1;
   }
 
-  setStatus(text) {
+  setStatus(text, force = false) {
+    const now = performance.now();
+    if (!force && now - this.lastStatusAt < 1000) return;
+    this.lastStatusAt = now;
     if (this.status) this.status.textContent = text;
   }
 
@@ -20,57 +31,51 @@ class ICatchLivePlayer {
       try { this.ws.close(); } catch (_) {}
       this.ws = null;
     }
-    if (this.decoder) {
-      try { this.decoder.close(); } catch (_) {}
-      this.decoder = null;
+    for (const decoder of this.decoders) {
+      try { decoder.close(); } catch (_) {}
     }
-    this.setStatus('已停止原生即時播放');
+    this.decoders = [];
+    this.setStatus('已停止原生即時播放', true);
   }
 
-  async start({ host, user, password, channel = 1, quality = 'sub' }) {
+  async start({ host, user, password, channel = 1, channels = [channel], quality = 'sub' }) {
     if (!('VideoDecoder' in window)) {
       throw new Error('這個瀏覽器不支援 WebCodecs，請用新版 Chrome / Edge');
     }
     this.stop();
+
+    const wanted = channels.map(Number).filter(ch => ch >= 1 && ch <= 16);
+    if (wanted.length === 0) throw new Error('沒有可播放的 channel');
+    if (wanted.length > this.canvases.length) throw new Error('播放器畫面數不足');
+
     this.running = true;
-    this.frames = 0;
-    this.timestamp = 0;
+    this.channelCount = wanted.length;
+    this.frames = Array(16).fill(0);
+    this.timestamps = Array(16).fill(0);
+    this.gotKeyFrame = Array(16).fill(false);
+    this.decoders = Array(16).fill(null);
 
     const cleanHost = host.replace(/^https?:\/\//, '').replace(/\/+$/, '');
     const high = ['main', 'high', 'hq', '1'].includes(String(quality).toLowerCase());
-    const bit = 1 << (Number(channel) - 1);
-    const cmd = `vobits=${bit.toString(16)},pbits=${bit.toString(16)},aobits=0,hq=${high ? 1 : 0}`;
+    const bits = wanted.reduce((sum, ch) => sum | (1 << (ch - 1)), 0);
+    const cmd = `vobits=${bits.toString(16)},pbits=${bits.toString(16)},aobits=0,hq=${high ? 1 : 0}`;
     const auth = 'Basic ' + btoa(`${user}:${password}`);
 
-    this.decoder = new VideoDecoder({
-      output: frame => {
-        this.canvas.width = frame.displayWidth;
-        this.canvas.height = frame.displayHeight;
-        this.ctx.drawImage(frame, 0, 0, this.canvas.width, this.canvas.height);
-        frame.close();
-        this.frames += 1;
-        if (this.frames % 15 === 0) this.setStatus(`▶ 原生即時播放中：${this.frames} frames`);
-      },
-      error: err => {
-        this.setStatus(`❌ 解碼失敗：${err.message || err}`);
-        this.stop();
-      }
+    wanted.forEach((ch, index) => {
+      const canvas = this.canvases[index];
+      const ctx = this.contexts[index];
+      const channelIndex = ch - 1;
+      this.decoders[channelIndex] = this.createDecoder({ canvas, ctx, channel: ch });
     });
 
-    this.decoder.configure({
-      codec: 'avc1.42E01E',
-      optimizeForLatency: true,
-      avc: { format: 'annexb' }
-    });
-
-    this.setStatus('連線 DVR WebSocket 中…');
+    this.setStatus(`連線 DVR WebSocket 中…（${wanted.join(', ')}）`, true);
     this.ws = new WebSocket(`wss://${cleanHost}/streaming`);
     this.ws.binaryType = 'arraybuffer';
 
-    this.ws.onopen = () => this.setStatus('已連線，等待 DVR 初始化…');
-    this.ws.onerror = () => this.setStatus('❌ WebSocket 連線失敗。若是憑證問題，請先開 DVR HTTPS 頁面允許憑證。');
+    this.ws.onopen = () => this.setStatus('已連線，等待 DVR 初始化…', true);
+    this.ws.onerror = () => this.setStatus('❌ WebSocket 連線失敗。若是憑證問題，請先開 DVR HTTPS 頁面允許憑證。', true);
     this.ws.onclose = () => {
-      if (this.running) this.setStatus('連線已中斷');
+      if (this.running) this.setStatus('連線已中斷', true);
       this.running = false;
     };
     this.ws.onmessage = event => {
@@ -81,14 +86,49 @@ class ICatchLivePlayer {
       if (bytes.length >= 4 && text4(bytes, 0) === 'wsli') {
         this.ws.send(auth);
         this.ws.send(cmd);
-        this.setStatus('已送出登入與播放指令…');
+        this.setStatus('已送出登入與 4CH 播放指令，等待關鍵影格…', true);
         return;
       }
-      this.processPacket(bytes, Number(channel) - 1);
+      this.processPacket(bytes);
     };
   }
 
-  processPacket(bytes, wantedChannel) {
+  createDecoder({ canvas, ctx, channel }) {
+    const decoder = new VideoDecoder({
+      output: frame => {
+        // Canvas resizing is expensive on phones. Only resize when resolution changes.
+        if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
+          canvas.width = frame.displayWidth;
+          canvas.height = frame.displayHeight;
+        }
+        ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+        frame.close();
+        const idx = channel - 1;
+        this.frames[idx] += 1;
+        this.updatePlaybackStatus();
+      },
+      error: err => {
+        this.setStatus(`❌ CH${channel} 解碼失敗：${err.message || err}`, true);
+      }
+    });
+
+    decoder.configure({
+      codec: 'avc1.42E01E',
+      optimizeForLatency: true,
+      avc: { format: 'annexb' }
+    });
+    return decoder;
+  }
+
+  updatePlaybackStatus() {
+    const active = this.frames
+      .map((count, idx) => count > 0 ? `CH${idx + 1}:${count}` : null)
+      .filter(Boolean)
+      .join('  ');
+    this.setStatus(`▶ 原生 4CH 即時播放中：${active || '等待影格'}`);
+  }
+
+  processPacket(bytes) {
     let done = 0;
     while (done + 40 <= bytes.length) {
       const fourcc = text4(bytes, done);
@@ -98,35 +138,40 @@ class ICatchLivePlayer {
       const frameSize = 40 + exSize + dataSize;
       if (frameSize <= 0 || done + frameSize > bytes.length) break;
 
-      if (fourcc === 'H264' && ch === wantedChannel && dataSize > 0) {
+      if (fourcc === 'H264' && ch >= 0 && ch < this.decoders.length && this.decoders[ch] && dataSize > 0) {
         const key = done + 56 < bytes.length ? u32(bytes, done + 56) : 0;
         const payload = bytes.slice(done + 40 + exSize, done + frameSize);
-        this.decode(payload, key === 1);
+        this.decode(ch, payload, key === 1);
       }
       done += frameSize;
     }
   }
 
-  decode(payload, isKey) {
-    if (!this.decoder || this.decoder.state !== 'configured') return;
+  decode(channelIndex, payload, isKey) {
+    const decoder = this.decoders[channelIndex];
+    if (!decoder || decoder.state !== 'configured') return;
 
-    // Keep latency low on phones: if decoding falls behind, drop delta frames
-    // and wait for the next key frame instead of building a huge queue.
-    if (this.decoder.decodeQueueSize > 2 && !isKey) return;
-    if (this.decoder.decodeQueueSize > 8) {
-      this.setStatus('⚠️ 手機解碼跟不上，已自動降延遲丟幀');
+    // A browser decoder must start from a key frame. Dropping early delta frames
+    // also prevents a large startup backlog that feels like lag.
+    if (isKey) this.gotKeyFrame[channelIndex] = true;
+    if (!this.gotKeyFrame[channelIndex]) return;
+
+    // Keep latency low on phones: prefer dropping frames over delayed playback.
+    if (decoder.decodeQueueSize > 1 && !isKey) return;
+    if (decoder.decodeQueueSize > 4) {
+      this.setStatus(`⚠️ CH${channelIndex + 1} 手機解碼跟不上，已丟幀降延遲`);
       return;
     }
 
-    this.timestamp += 33333; // ~30fps timestamp; display is still driven by decoded output.
+    this.timestamps[channelIndex] += 33333; // ~30fps timestamp.
     try {
-      this.decoder.decode(new EncodedVideoChunk({
+      decoder.decode(new EncodedVideoChunk({
         type: isKey ? 'key' : 'delta',
-        timestamp: this.timestamp,
+        timestamp: this.timestamps[channelIndex],
         data: payload
       }));
     } catch (err) {
-      this.setStatus(`❌ 送入解碼器失敗：${err.message || err}`);
+      this.setStatus(`❌ CH${channelIndex + 1} 送入解碼器失敗：${err.message || err}`, true);
     }
   }
 }
