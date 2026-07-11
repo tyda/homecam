@@ -70,7 +70,23 @@ async function testICatch() {
   }
 }
 
-async function showICatchSnapshot() {
+let liveRunning = false;
+let liveObjectUrl = null;
+
+async function fetchICatchFrame(body) {
+  const res = await fetch('/api/icatch/snapshot/1', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || '抓圖失敗');
+  }
+  return await res.blob();
+}
+
+async function startICatchLive() {
   const img = document.querySelector('#icatchPreview');
   let body;
   try {
@@ -80,29 +96,32 @@ async function showICatchSnapshot() {
     return;
   }
 
-  resultEl.textContent = '抓 CH1 圖片中，約 10～20 秒…';
-  img.removeAttribute('src');
-  try {
-    const res = await fetch('/api/icatch/snapshot/1', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      throw new Error(data.detail || '抓圖失敗');
+  liveRunning = true;
+  resultEl.textContent = '播放中… Vercel 會逐張解碼成近即時畫面';
+  while (liveRunning) {
+    try {
+      const blob = await fetchICatchFrame(body);
+      if (liveObjectUrl) URL.revokeObjectURL(liveObjectUrl);
+      liveObjectUrl = URL.createObjectURL(blob);
+      img.src = liveObjectUrl;
+      resultEl.textContent = `▶ CH1 播放中：${new Date().toLocaleTimeString()}`;
+    } catch (err) {
+      resultEl.textContent = `❌ ${err.message}`;
+      liveRunning = false;
     }
-    const blob = await res.blob();
-    img.src = URL.createObjectURL(blob);
-    resultEl.textContent = '✅ 已顯示 CH1 圖片（使用子碼流）';
-  } catch (err) {
-    resultEl.textContent = `❌ ${err.message}`;
+    await new Promise(resolve => setTimeout(resolve, 300));
   }
+}
+
+function stopICatchLive() {
+  liveRunning = false;
+  resultEl.textContent = '已停止播放';
 }
 
 document.querySelector('#refreshBtn').addEventListener('click', refresh);
 document.querySelector('#icatchTest').addEventListener('click', testICatch);
-document.querySelector('#icatchSnapshot').addEventListener('click', showICatchSnapshot);
+document.querySelector('#icatchLive').addEventListener('click', startICatchLive);
+document.querySelector('#icatchStop').addEventListener('click', stopICatchLive);
 document.querySelector('#sendTelegram').addEventListener('click', async () => {
   statusEl.textContent = '傳送中…';
   try {
