@@ -154,8 +154,6 @@ function openDvrLivePage() {
 document.querySelector('#refreshBtn').addEventListener('click', refresh);
 document.querySelector('#icatchTest').addEventListener('click', testICatch);
 document.querySelector('#nativeLive').addEventListener('click', startNativeLive);
-document.querySelector('#icatchLive').addEventListener('click', startICatchLive);
-document.querySelector('#openDvrLive').addEventListener('click', openDvrLivePage);
 document.querySelector('#icatchStop').addEventListener('click', stopICatchLive);
 document.querySelector('#sendTelegram').addEventListener('click', async () => {
   statusEl.textContent = '傳送中…';
