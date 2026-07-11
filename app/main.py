@@ -333,7 +333,7 @@ app = FastAPI(title="HomeCam", version="0.1.0")
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"ok": True, "camera_count": len(load_cameras()), "ffmpeg": bool(Path("/usr/bin/ffmpeg").exists())}
+    return {"ok": True, "camera_count": len(load_cameras()), "ffmpeg": bool(ffmpeg_exe())}
 
 
 @app.get("/api/cameras")
