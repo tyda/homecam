@@ -1,6 +1,7 @@
 const stamp = () => `t=${Date.now()}`;
 const grid = document.querySelector('#grid');
 const statusEl = document.querySelector('#status');
+const resultEl = document.querySelector('#icatchResult');
 
 async function loadCameras() {
   const res = await fetch('/api/cameras');
@@ -24,7 +25,45 @@ function refresh() {
   });
 }
 
+function renderICatchResult(data) {
+  const lines = [];
+  lines.push(data.ok ? '✅ 有收到串流' : '⚠️ 沒收到串流');
+  lines.push(`Host：${data.host}`);
+  lines.push(`畫質：${data.quality}`);
+  for (const ch of data.channels || []) {
+    const size = ch.width && ch.height ? `${ch.width}x${ch.height}` : '-';
+    lines.push(`${ch.ok ? '✅' : '❌'} ${ch.id}：${ch.codec || '-'} ${size}，frames=${ch.frames}`);
+  }
+  resultEl.textContent = lines.join('\n');
+}
+
+async function testICatch() {
+  const host = document.querySelector('#icatchHost').value.trim();
+  const user = document.querySelector('#icatchUser').value.trim() || 'admin';
+  const password = document.querySelector('#icatchPassword').value;
+  const quality = document.querySelector('#icatchQuality').value;
+  if (!host || !password) {
+    resultEl.textContent = '請輸入 IP / Host 和密碼';
+    return;
+  }
+
+  resultEl.textContent = '測試中，約 5～10 秒…';
+  try {
+    const res = await fetch('/api/icatch/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host, user, password, quality })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || '測試失敗');
+    renderICatchResult(data);
+  } catch (err) {
+    resultEl.textContent = `❌ ${err.message}`;
+  }
+}
+
 document.querySelector('#refreshBtn').addEventListener('click', refresh);
+document.querySelector('#icatchTest').addEventListener('click', testICatch);
 document.querySelector('#sendTelegram').addEventListener('click', async () => {
   statusEl.textContent = '傳送中…';
   try {

@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageDraw
+from pydantic import BaseModel, Field
 
 load_dotenv()
 
@@ -32,6 +33,13 @@ class Camera:
     id: str
     name: str
     url: str
+
+
+class ICatchRequest(BaseModel):
+    host: str = Field(min_length=3, max_length=255)
+    user: str = Field(default="admin", min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=200)
+    quality: str = "sub"
 
 
 def load_cameras() -> list[Camera]:
@@ -105,9 +113,9 @@ def snapshot_from_rtsp(url: str) -> bytes:
         return data
 
 
-async def _capture_icatch_h264(host: str, channel: int, high_quality: bool, seconds: float) -> bytes:
-    user = os.getenv("ICATCH_USER", "admin")
-    password = os.getenv("ICATCH_PASSWORD")
+async def _capture_icatch_h264(host: str, channel: int, high_quality: bool, seconds: float, user: str | None = None, password: str | None = None) -> bytes:
+    user = user or os.getenv("ICATCH_USER", "admin")
+    password = password or os.getenv("ICATCH_PASSWORD")
     if not password:
         raise HTTPException(status_code=400, detail="未設定 ICATCH_PASSWORD")
 
@@ -165,11 +173,75 @@ async def _capture_icatch_h264(host: str, channel: int, high_quality: bool, seco
     return bytes(h264)
 
 
+def normalize_icatch_host(host: str) -> str:
+    host = host.strip()
+    if "://" in host:
+        parsed = urlparse(host)
+        host = parsed.hostname or host
+    host = host.strip().strip("/")
+    if not host:
+        raise HTTPException(status_code=400, detail="host 不可空白")
+    return host
+
+
+async def _probe_icatch_stream(req: ICatchRequest, seconds: float = 5) -> dict:
+    host = normalize_icatch_host(req.host)
+    auth = "Basic " + base64.b64encode(f"{req.user}:{req.password}".encode()).decode()
+    ssl_ctx = ssl._create_unverified_context()
+    high_quality = req.quality.lower() in {"main", "high", "hq", "1"}
+    cmd = f"vobits=f,pbits=f,aobits=0,hq={1 if high_quality else 0}"
+    stats = {i: {"frames": 0, "keyframes": 0, "bytes": 0, "width": None, "height": None, "codec": None} for i in range(1, 5)}
+    uri = f"wss://{host}/streaming"
+    deadline = time.time() + seconds
+
+    try:
+        async with websockets.connect(uri, ssl=ssl_ctx, open_timeout=8, max_size=None) as ws:
+            hello = await asyncio.wait_for(ws.recv(), timeout=5)
+            if not (isinstance(hello, bytes) and hello[:4] == b"wsli"):
+                raise HTTPException(status_code=502, detail="沒有收到 iCATCH live 初始化訊號")
+            await ws.send(auth)
+            await ws.send(cmd)
+            while time.time() < deadline:
+                try:
+                    msg = await asyncio.wait_for(ws.recv(), timeout=3)
+                except asyncio.TimeoutError:
+                    break
+                if not isinstance(msg, bytes) or len(msg) < 40:
+                    continue
+                done = 0
+                while done + 40 <= len(msg):
+                    fourcc = msg[done : done + 4]
+                    data_size = struct.unpack_from("<I", msg, done + 24)[0]
+                    ch = struct.unpack_from("<I", msg, done + 28)[0]
+                    ex_size = struct.unpack_from("<I", msg, done + 36)[0]
+                    frame_size = 40 + ex_size + data_size
+                    if frame_size <= 0 or done + frame_size > len(msg):
+                        break
+                    frame = msg[done : done + frame_size]
+                    if fourcc in {b"H264", b"H265"} and 0 <= ch <= 3:
+                        key = struct.unpack_from("<I", frame, 56)[0] if len(frame) >= 60 else 0
+                        width = struct.unpack_from("<I", frame, 60)[0] if len(frame) >= 68 else None
+                        height = struct.unpack_from("<I", frame, 64)[0] if len(frame) >= 68 else None
+                        st = stats[ch + 1]
+                        st["frames"] += 1
+                        st["keyframes"] += 1 if key == 1 else 0
+                        st["bytes"] += data_size
+                        st["width"] = width
+                        st["height"] = height
+                        st["codec"] = fourcc.decode()
+                    done += frame_size
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"連線失敗：{type(exc).__name__}") from exc
+
+    channels = [{"id": f"ch{ch}", **st, "ok": st["frames"] > 0} for ch, st in stats.items()]
+    return {"ok": any(c["ok"] for c in channels), "host": host, "quality": "main" if high_quality else "sub", "channels": channels}
+
+
 def snapshot_from_icatch(url: str) -> bytes:
     parsed = urlparse(url)
-    host = parsed.hostname or os.getenv("ICATCH_HOST")
-    if not host:
-        raise HTTPException(status_code=400, detail="iCATCH URL 缺少 host")
+    host = normalize_icatch_host(parsed.hostname or os.getenv("ICATCH_HOST") or "")
     qs = parse_qs(parsed.query)
     channel_text = qs.get("channel", [None])[0]
     if channel_text is None:
@@ -277,6 +349,12 @@ def telegram_send_grid() -> dict:
         if r.status_code >= 400:
             raise HTTPException(status_code=502, detail=r.text[-500:])
         return {"ok": True, "telegram": r.json()}
+
+
+@app.post("/api/icatch/test")
+async def icatch_test(req: ICatchRequest) -> dict:
+    # Password is used only for this request; do not store it anywhere.
+    return await _probe_icatch_stream(req)
 
 
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

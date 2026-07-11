@@ -15,6 +15,19 @@
     <button id="refreshBtn">刷新</button>
   </header>
   <main>
+    <section class="cloud-test">
+      <h2>手動連線測試</h2>
+      <p>每次輸入，不儲存密碼。先測 DVR 是否有 4 路串流。</p>
+      <div class="form-grid">
+        <label>IP / Host<input id="icatchHost" placeholder="例如 123.123.123.123" autocomplete="off"></label>
+        <label>帳號<input id="icatchUser" value="admin" autocomplete="username"></label>
+        <label>密碼<input id="icatchPassword" type="password" autocomplete="current-password"></label>
+        <label>畫質<select id="icatchQuality"><option value="sub">子碼流</option><option value="main">主碼流</option></select></label>
+      </div>
+      <button id="icatchTest">測試連線</button>
+      <pre id="icatchResult"></pre>
+    </section>
+
     <section class="grid-card"><img id="grid" alt="四格監視器畫面" src="/api/grid/snapshot" /></section>
     <section id="cameras" class="camera-list"></section>
     <section class="actions"><button id="sendTelegram">傳四格到 Telegram</button><p id="status"></p></section>
